@@ -121,6 +121,7 @@ select.form-input{flex:1;min-width:0}
         <option value="">-- Selecione um arquivo --</option>
       </select>
       <button class="btn" onclick="refreshExperiments()">Atualizar</button>
+      <button class="btn" onclick="downloadCsv()" id="btnDownload" title="Baixar CSV" disabled>&#8681; Baixar CSV</button>
     </div>
     <div id="experimentStats" class="stats" style="display:none"></div>
   </div>
@@ -306,12 +307,15 @@ function selectAndLoad(filepath) {
 
 async function loadExperiment() {
   const path = $expSelect.value;
+  const btnDownload = document.getElementById('btnDownload');
   if (!path) {
     $expStats.style.display = 'none';
     document.getElementById('timeSeriesPlot').innerHTML = '';
     document.getElementById('energyPlot').innerHTML = '';
+    if (btnDownload) btnDownload.disabled = true;
     return;
   }
+  if (btnDownload) btnDownload.disabled = false;
   currentExperiment = path.split('/').pop();
   try {
     const r = await fetch('/api/experiment/' + encodeURIComponent(path));
@@ -381,6 +385,13 @@ function stopLiveUpdates() {
     liveUpdateInterval = null;
   }
   lastWindowCount = 0;
+}
+
+function downloadCsv() {
+  const path = $expSelect.value;
+  if (!path) return;
+  const filename = path.split('/').pop() || path;
+  window.location.href = '/api/download/' + encodeURIComponent(filename);
 }
 
 // Init - verificar dispositivo primeiro, depois status da captura

@@ -3,6 +3,7 @@ Joulescope Logger - Web app for continuous power/energy logging.
 Single-page frontend with capture controls and visualization.
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -10,14 +11,16 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from joulescope_manager import JoulescopeManager
+from .joulescope_manager import JoulescopeManager
 
-LOG_DIR = os.getenv("LOG_DIR", "/app/logs")
+# Default: ./logs relative to project root (works for local dev); Docker sets LOG_DIR=/app/logs
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+LOG_DIR = os.getenv("LOG_DIR", str(_PROJECT_ROOT / "logs"))
 PORT = int(os.getenv("PORT", "8080"))
 
 manager = JoulescopeManager(log_dir=LOG_DIR)
@@ -34,10 +37,25 @@ async def list_devices():
     return {"devices": manager.get_devices()}
 
 
+def _json_safe(obj):
+    """Convert nan/inf to None for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (int, str, bool, type(None))):
+        return obj
+    try:
+        f = float(obj)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    except (TypeError, ValueError):
+        return obj
+
+
 @app.get("/api/capture/status")
 async def capture_status():
     """Get current capture status."""
-    return manager.get_status()
+    return _json_safe(manager.get_status())
 
 
 class CaptureStartRequest(BaseModel):
@@ -125,25 +143,30 @@ def create_plots(df: pd.DataFrame) -> dict:
         vertical_spacing=0.08,
         shared_xaxes=True,
     )
+    # Linha contínua suave, sem markers, conectando gaps (NaN)
+    line_config = dict(shape="spline")
     if "Window Start" in df.columns and "Current Mean (A)" in df.columns:
         x = df["Window Start"].tolist()
         fig1.add_trace(
-            go.Scatter(x=x, y=df["Current Mean (A)"].tolist(), mode="lines+markers",
-                       name="Current Mean", line=dict(color="#58a6ff")),
+            go.Scatter(x=x, y=df["Current Mean (A)"].tolist(), mode="lines",
+                       name="Current Mean", connectgaps=True,
+                       line=dict(color="#58a6ff", **line_config)),
             row=1, col=1,
         )
     if "Window Start" in df.columns and "Voltage Mean (V)" in df.columns:
         x = df["Window Start"].tolist()
         fig1.add_trace(
-            go.Scatter(x=x, y=df["Voltage Mean (V)"].tolist(), mode="lines+markers",
-                       name="Voltage Mean", line=dict(color="#3fb950")),
+            go.Scatter(x=x, y=df["Voltage Mean (V)"].tolist(), mode="lines",
+                       name="Voltage Mean", connectgaps=True,
+                       line=dict(color="#3fb950", **line_config)),
             row=2, col=1,
         )
     if "Window Start" in df.columns and "Power Mean (W)" in df.columns:
         x = df["Window Start"].tolist()
         fig1.add_trace(
-            go.Scatter(x=x, y=df["Power Mean (W)"].tolist(), mode="lines+markers",
-                       name="Power Mean", line=dict(color="#f85149")),
+            go.Scatter(x=x, y=df["Power Mean (W)"].tolist(), mode="lines",
+                       name="Power Mean", connectgaps=True,
+                       line=dict(color="#f85149", **line_config)),
             row=3, col=1,
         )
     fig1.update_xaxes(title_text="Time", row=3, col=1)
@@ -159,8 +182,8 @@ def create_plots(df: pd.DataFrame) -> dict:
         x = df["Window Start"].tolist()
         fig2.add_trace(go.Scatter(
             x=x, y=df["Cumulative Energy (J)"].tolist(),
-            mode="lines+markers", name="Cumulative Energy",
-            line=dict(color="#a371f7", width=2),
+            mode="lines", name="Cumulative Energy", connectgaps=True,
+            line=dict(color="#a371f7", width=2, shape="spline"),
         ))
         if "Energy (J)" in df.columns:
             fig2.add_trace(go.Bar(
@@ -175,6 +198,23 @@ def create_plots(df: pd.DataFrame) -> dict:
         figures["energy"] = fig2.to_json()
 
     return figures
+
+
+@app.get("/api/download/{filename}")
+async def download_experiment(filename: str):
+    """Download experiment CSV file."""
+    # Sanitize: only allow filename, no path traversal
+    safe_name = Path(filename).name
+    if not safe_name.endswith(".csv"):
+        return JSONResponse(status_code=400, content={"error": "Invalid file"})
+    path = Path(LOG_DIR) / safe_name
+    if not path.exists() or not path.is_file():
+        return JSONResponse(status_code=404, content={"error": "File not found"})
+    return FileResponse(
+        path=path,
+        filename=safe_name,
+        media_type="text/csv",
+    )
 
 
 @app.get("/api/experiment/{filename}")
