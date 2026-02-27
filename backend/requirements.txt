@@ -6,3 +6,4 @@ pyjoulescope-driver
 numpy
 pandas
 plotly
+tzdata
