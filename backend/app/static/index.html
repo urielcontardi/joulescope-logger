@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Joulescope Logger</title>
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--surface:#161b22;--border:#30363d;
+  --text:#c9d1d9;--text-dim:#8b949e;--accent:#58a6ff;
+  --green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#f0883e;
+}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:var(--bg);color:var(--text)}
+body{display:flex;flex-direction:column}
+
+header{display:flex;align-items:center;justify-content:space-between;
+  padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border)}
+header h1{font-size:18px;font-weight:600}
+header h1 span{color:var(--accent)}
+.header-status{font-size:12px;color:var(--text-dim)}
+
+.main{flex:1;overflow:auto;padding:20px;display:grid;grid-template-columns:1fr 1fr;gap:20px;
+  align-content:start}
+@media(max-width:900px){.main{grid-template-columns:1fr}}
+
+.section{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px}
+.section h2{font-size:15px;font-weight:600;margin-bottom:16px;color:var(--accent);display:flex;align-items:center;gap:8px}
+
+.form-group{margin-bottom:12px}
+.form-group label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:4px;font-weight:500}
+.form-input{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;
+  background:var(--bg);color:var(--text);font-size:13px}
+.form-input:focus{outline:none;border-color:var(--accent)}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+.btn{padding:8px 16px;border:1px solid var(--border);border-radius:6px;
+  background:var(--bg);color:var(--text);font-size:13px;cursor:pointer;transition:.15s;font-family:inherit}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn-start{border-color:var(--green);color:var(--green);font-weight:600}
+.btn-start:hover{background:rgba(63,185,80,0.1)}
+.btn-stop{border-color:var(--red);color:var(--red);font-weight:600}
+.btn-stop:hover{background:rgba(248,81,73,0.1)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+
+.status-badge{padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600}
+.status-badge.running{background:rgba(63,185,80,0.2);color:var(--green)}
+.status-badge.stopped{background:rgba(139,148,158,0.2);color:var(--text-dim)}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}
+.stat-box{background:var(--bg);padding:12px;border-radius:6px;border-left:4px solid var(--accent)}
+.stat-label{font-size:11px;color:var(--text-dim);text-transform:uppercase}
+.stat-value{font-size:18px;font-weight:600;color:var(--text)}
+
+.select-row{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+select.form-input{flex:1;min-width:0}
+
+.plot-container{margin-top:12px;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--bg)}
+
+.live-indicator{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--green)}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.device-ok{background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.4);color:var(--green)}
+.device-err{background:rgba(248,81,73,0.15);border:1px solid rgba(248,81,73,0.4);color:var(--red)}
+.device-checking{background:rgba(139,148,158,0.1);border:1px solid var(--border);color:var(--text-dim)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>&#9889;</span> Joulescope Logger</h1>
+  <div class="header-status" id="header-status">
+    <span id="device-status">Verificando dispositivos...</span>
+    <span id="capture-status" class="status-badge stopped">Parado</span>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- Capture -->
+  <div class="section">
+    <h2>&#9654; Captura</h2>
+    <div id="deviceCheck" class="device-checking" style="margin-bottom:16px;padding:12px;border-radius:6px;font-size:13px;display:flex;align-items:center;gap:8px">
+      <span id="deviceCheckIcon" style="font-size:18px">&#8987;</span>
+      <span id="deviceCheckText">Verificando dispositivo Joulescope...</span>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Janela (segundos)</label>
+        <input type="number" id="windowDuration" class="form-input" value="10" min="1" step="0.1">
+      </div>
+      <div class="form-group">
+        <label>Arquivo de saída</label>
+        <input type="text" id="outputFile" class="form-input" value="joulescope_log.csv">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Taxa de amostragem (Hz, opcional)</label>
+        <input type="number" id="samplingRate" class="form-input" placeholder="Auto" min="1">
+      </div>
+      <div class="form-group">
+        <label>Máx. janelas (0 = ilimitado)</label>
+        <input type="number" id="maxWindows" class="form-input" value="0" min="0">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn btn-start" id="btnStart" onclick="startCapture()">Iniciar Captura</button>
+      <button class="btn btn-stop" id="btnStop" onclick="stopCapture()" disabled>Parar</button>
+    </div>
+    <div id="captureInfo" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
+  </div>
+
+  <!-- Experiments -->
+  <div class="section">
+    <h2>&#128196; Experimentos</h2>
+    <div class="select-row">
+      <select id="experimentSelect" class="form-input" onchange="loadExperiment()">
+        <option value="">-- Selecione um arquivo --</option>
+      </select>
+      <button class="btn" onclick="refreshExperiments()">Atualizar</button>
+    </div>
+    <div id="experimentStats" class="stats" style="display:none"></div>
+  </div>
+
+  <!-- Plots - full width -->
+  <div class="section" style="grid-column:1/-1">
+    <h2>
+      <span>&#128200;</span> Gráficos
+      <span id="liveIndicator" class="live-indicator" style="display:none">
+        <span class="live-dot"></span> Ao vivo
+      </span>
+    </h2>
+    <div id="timeSeriesPlot" class="plot-container" style="height:400px"></div>
+    <div id="energyPlot" class="plot-container" style="height:300px;margin-top:12px"></div>
+  </div>
+
+</div>
+
+<script>
+let ws = null;
+let liveUpdateInterval = null;
+let currentExperiment = null;
+
+const $deviceStatus = document.getElementById('device-status');
+const $captureStatus = document.getElementById('capture-status');
+const $captureInfo = document.getElementById('captureInfo');
+const $btnStart = document.getElementById('btn-start') || document.getElementById('btnStart');
+const $btnStop = document.getElementById('btn-stop') || document.getElementById('btnStop');
+const $expSelect = document.getElementById('experimentSelect');
+const $expStats = document.getElementById('experimentStats');
+const $liveIndicator = document.getElementById('liveIndicator');
+
+let deviceAvailable = false;
+
+async function fetchDevices() {
+  try {
+    const r = await fetch('/api/devices');
+    const d = await r.json();
+    const devices = d.devices || [];
+    const $check = document.getElementById('deviceCheck');
+    const $icon = document.getElementById('deviceCheckIcon');
+    const $text = document.getElementById('deviceCheckText');
+    if (devices.length && devices[0].error) {
+      deviceAvailable = false;
+      $deviceStatus.textContent = 'Erro: ' + devices[0].error;
+      $check.className = 'device-err';
+      $icon.textContent = '\u2717';
+      $text.textContent = 'Dispositivo não encontrado: ' + devices[0].error;
+    } else if (devices.length) {
+      deviceAvailable = true;
+      $deviceStatus.textContent = devices.length + ' dispositivo(s) encontrado(s)';
+      $check.className = 'device-ok';
+      $icon.textContent = '\u2713';
+      $text.textContent = 'Joulescope conectado: ' + (devices[0].name || devices.length + ' dispositivo(s)');
+    } else {
+      deviceAvailable = false;
+      $deviceStatus.textContent = 'Nenhum Joulescope conectado';
+      $check.className = 'device-err';
+      $icon.textContent = '\u2717';
+      $text.textContent = 'Conecte o Joulescope via USB antes de iniciar a captura.';
+    }
+    if (!document.getElementById('capture-status').textContent.includes('Capturando')) {
+      $btnStart.disabled = !deviceAvailable;
+    }
+  } catch (e) {
+    deviceAvailable = false;
+    $deviceStatus.textContent = 'Erro ao verificar';
+    document.getElementById('deviceCheckText').textContent = 'Erro ao verificar dispositivos.';
+    $btnStart.disabled = true;
+  }
+}
+
+async function updateCaptureStatus() {
+  try {
+    const r = await fetch('/api/capture/status');
+    const s = await r.json();
+    if (s.running) {
+      $captureStatus.textContent = 'Capturando';
+      $captureStatus.className = 'status-badge running';
+      $btnStart.disabled = true;
+      $btnStop.disabled = false;
+      $captureInfo.textContent = `Arquivo: ${s.output_file || 'N/A'} | Janelas: ${s.window_count || 0} | Energia: ${(s.total_energy || 0).toFixed(4)} J`;
+    } else {
+      $captureStatus.textContent = 'Parado';
+      $captureStatus.className = 'status-badge stopped';
+      $btnStart.disabled = !deviceAvailable;
+      $btnStop.disabled = true;
+      $captureInfo.textContent = '';
+    }
+    return s;
+  } catch { return {}; }
+}
+
+async function startCapture() {
+  const body = {
+    window_duration: parseFloat(document.getElementById('windowDuration').value) || 10,
+    output_file: document.getElementById('outputFile').value || 'joulescope_log.csv',
+    sampling_rate: document.getElementById('samplingRate').value || null,
+    max_windows: parseInt(document.getElementById('maxWindows').value) || 0,
+  };
+  if (body.sampling_rate) body.sampling_rate = parseFloat(body.sampling_rate);
+  try {
+    const r = await fetch('/api/capture/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.error) {
+      alert('Erro: ' + d.error);
+      return;
+    }
+    await updateCaptureStatus();
+    connectWs();
+    setTimeout(() => {
+      refreshExperiments();
+      selectAndLoad(body.output_file);
+      startLiveUpdates(body.output_file);
+    }, 2000);
+  } catch (e) { alert('Erro: ' + e.message); }
+}
+
+async function stopCapture() {
+  try {
+    await fetch('/api/capture/stop', { method: 'POST' });
+    disconnectWs();
+    stopLiveUpdates();
+    await updateCaptureStatus();
+    $btnStart.disabled = false;
+    $btnStop.disabled = true;
+    refreshExperiments();
+  } catch (e) { alert('Erro: ' + e.message); }
+}
+
+function connectWs() {
+  if (ws) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/api/ws/capture');
+  ws.onmessage = (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      $captureInfo.textContent = `Arquivo: ${currentExperiment || 'N/A'} | Janelas: ${d.window_num || 0} | Energia: ${(d.total_energy || 0).toFixed(4)} J`;
+    } catch {}
+  };
+  ws.onclose = () => { ws = null; };
+  $liveIndicator.style.display = 'inline-flex';
+}
+
+function disconnectWs() {
+  if (ws) { ws.close(); ws = null; }
+  $liveIndicator.style.display = 'none';
+}
+
+async function refreshExperiments() {
+  try {
+    const r = await fetch('/api/experiments');
+    const d = await r.json();
+    const files = d.files || [];
+    const sel = $expSelect;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">-- Selecione um arquivo --</option>';
+    files.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.path;
+      opt.textContent = f.name;
+      sel.appendChild(opt);
+    });
+    if (cur) sel.value = cur;
+  } catch {}
+}
+
+function selectAndLoad(filepath) {
+  const name = filepath.split('/').pop() || filepath;
+  const opts = $expSelect.options;
+  for (let i = 0; i < opts.length; i++) {
+    if (opts[i].value && opts[i].value.endsWith(name)) {
+      $expSelect.value = opts[i].value;
+      loadExperiment();
+      return;
+    }
+  }
+}
+
+async function loadExperiment() {
+  const path = $expSelect.value;
+  if (!path) {
+    $expStats.style.display = 'none';
+    document.getElementById('timeSeriesPlot').innerHTML = '';
+    document.getElementById('energyPlot').innerHTML = '';
+    return;
+  }
+  currentExperiment = path.split('/').pop();
+  try {
+    const r = await fetch('/api/experiment/' + encodeURIComponent(path));
+    const d = await r.json();
+    if (d.error) {
+      alert('Erro: ' + d.error);
+      return;
+    }
+    displayStats(d.stats);
+    if (d.plots && d.plots.time_series) {
+      Plotly.newPlot('timeSeriesPlot', JSON.parse(d.plots.time_series), {}, {responsive: true});
+    } else {
+      document.getElementById('timeSeriesPlot').innerHTML = '<div style="padding:20px;color:var(--text-dim)">Sem dados para exibir</div>';
+    }
+    if (d.plots && d.plots.energy) {
+      Plotly.newPlot('energyPlot', JSON.parse(d.plots.energy), {}, {responsive: true});
+    } else {
+      document.getElementById('energyPlot').innerHTML = '';
+    }
+  } catch (e) { console.error(e); }
+}
+
+function displayStats(stats) {
+  if (!stats) return;
+  $expStats.style.display = 'grid';
+  const items = [
+    { label: 'Janelas', value: stats.total_windows },
+    { label: 'Energia Total', value: stats.total_energy + ' J' },
+    { label: 'Energia', value: stats.total_energy_mwh + ' mWh' },
+    { label: 'Corrente média', value: stats.avg_current + ' A' },
+    { label: 'Tensão média', value: stats.avg_voltage + ' V' },
+    { label: 'Potência média', value: stats.avg_power + ' W' },
+    { label: 'Duração', value: stats.duration },
+  ];
+  $expStats.innerHTML = items.map(i =>
+    `<div class="stat-box"><div class="stat-label">${i.label}</div><div class="stat-value">${i.value}</div></div>`
+  ).join('');
+}
+
+let lastWindowCount = 0;
+function startLiveUpdates(filepath) {
+  stopLiveUpdates();
+  liveUpdateInterval = setInterval(async () => {
+    const path = $expSelect.value || filepath;
+    if (!path) return;
+    try {
+      const r = await fetch('/api/experiment/' + encodeURIComponent(path));
+      const d = await r.json();
+      if (d.error) return;
+      if (d.stats && d.stats.total_windows > lastWindowCount) {
+        lastWindowCount = d.stats.total_windows;
+        displayStats(d.stats);
+        if (d.plots && d.plots.time_series) {
+          Plotly.react('timeSeriesPlot', JSON.parse(d.plots.time_series), {}, {responsive: true});
+        }
+        if (d.plots && d.plots.energy) {
+          Plotly.react('energyPlot', JSON.parse(d.plots.energy), {}, {responsive: true});
+        }
+      }
+    } catch {}
+  }, 3000);
+}
+
+function stopLiveUpdates() {
+  if (liveUpdateInterval) {
+    clearInterval(liveUpdateInterval);
+    liveUpdateInterval = null;
+  }
+  lastWindowCount = 0;
+}
+
+// Init - verificar dispositivo primeiro, depois status da captura
+fetchDevices().then(() => updateCaptureStatus());
+refreshExperiments();
+setInterval(fetchDevices, 5000);
+setInterval(updateCaptureStatus, 2000);
+</script>
+</body>
+</html>

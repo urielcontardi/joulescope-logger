@@ -1,0 +1,16 @@
+services:
+  joulescope-logger:
+    build: ./backend
+    container_name: joulescope-logger
+    privileged: true
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./logs:/app/logs
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+    environment:
+      - TZ=America/Sao_Paulo
+      - LOG_DIR=/app/logs
+      - PORT=8080
+    restart: always
