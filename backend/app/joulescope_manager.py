@@ -1,6 +1,7 @@
 """
 Joulescope Manager - Background capture service with window-based processing.
 Runs continuously when started, saves data to CSV, notifies subscribers for live updates.
+Sempre tenta reconectar em caso de falha. Timestamps em horário de São Paulo.
 """
 
 import csv
@@ -11,9 +12,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
+from zoneinfo import ZoneInfo
 
 import joulescope
 import numpy as np
+
+TZ_SAO_PAULO = ZoneInfo("America/Sao_Paulo")
+RETRY_DELAY_SEC = 10  # Espera entre tentativas de reconexão
 
 
 class JoulescopeManager:
@@ -42,6 +47,8 @@ class JoulescopeManager:
             'window_count': 0,
             'total_energy': 0.0,
             'last_window': None,
+            'reconnect_count': 0,
+            'last_error': None,
         }
 
     def subscribe(self, callback: Callable):
@@ -133,23 +140,29 @@ class JoulescopeManager:
             except Exception:
                 pass
 
+    def _now_sp(self) -> datetime:
+        """Retorna datetime atual em horário de São Paulo."""
+        return datetime.now(TZ_SAO_PAULO)
+
     def _log_to_csv(self, csv_path: Path, window_start: datetime, window_end: datetime,
                     duration: float, stats: dict, energy_joules: float, energy_mwh: float,
                     total_energy: float, gap_detected: bool):
         total_mwh = total_energy * (1000.0 / 3600.0)
+        now = self._now_sp()
+        # Alta resolução: 12 casas decimais para corrente/potência/energia, 9 para tensão, microsegundos em timestamps (SP)
         row = [
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            window_start.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-            window_end.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-            f'{duration:.3f}', stats['samples'],
-            f'{stats["current_mean"]:.9f}', f'{stats["current_std"]:.9f}',
-            f'{stats["current_min"]:.9f}', f'{stats["current_max"]:.9f}',
-            f'{stats["voltage_mean"]:.6f}', f'{stats["voltage_std"]:.6f}',
-            f'{stats["voltage_min"]:.6f}', f'{stats["voltage_max"]:.6f}',
-            f'{stats["power_mean"]:.9f}', f'{stats["power_std"]:.9f}',
-            f'{stats["power_min"]:.9f}', f'{stats["power_max"]:.9f}',
-            f'{energy_joules:.6f}', f'{energy_mwh:.6f}',
-            f'{total_energy:.6f}', f'{total_mwh:.6f}',
+            now.strftime('%Y-%m-%d %H:%M:%S.%f'),
+            window_start.strftime('%Y-%m-%d %H:%M:%S.%f'),
+            window_end.strftime('%Y-%m-%d %H:%M:%S.%f'),
+            f'{duration:.6f}', stats['samples'],
+            f'{stats["current_mean"]:.12f}', f'{stats["current_std"]:.12f}',
+            f'{stats["current_min"]:.12f}', f'{stats["current_max"]:.12f}',
+            f'{stats["voltage_mean"]:.9f}', f'{stats["voltage_std"]:.9f}',
+            f'{stats["voltage_min"]:.9f}', f'{stats["voltage_max"]:.9f}',
+            f'{stats["power_mean"]:.12f}', f'{stats["power_std"]:.12f}',
+            f'{stats["power_min"]:.12f}', f'{stats["power_max"]:.12f}',
+            f'{energy_joules:.12f}', f'{energy_mwh:.12f}',
+            f'{total_energy:.12f}', f'{total_mwh:.12f}',
             'GAP' if gap_detected else ''
         ]
         with open(csv_path, 'a', newline='', encoding='utf-8') as f:
@@ -160,7 +173,7 @@ class JoulescopeManager:
 
     def _capture_loop(self, window_duration: float, output_file: str,
                       sampling_rate: Optional[float], max_windows: int):
-        """Main capture loop - runs in background thread."""
+        """Main capture loop - nunca para, sempre tenta reconectar em caso de falha."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
         csv_path = self.log_dir / Path(output_file).name
         self._initialize_csv(csv_path)
@@ -168,115 +181,129 @@ class JoulescopeManager:
         total_energy = 0.0
         last_read_time = None
         window_num = 0
+        sampling_rate = sampling_rate or 1000000.0
 
-        try:
-            devices = joulescope.scan()
-            if not devices:
-                with self._lock:
-                    self._status['running'] = False
-                    self._status['error'] = 'No Joulescope devices found'
-                return
+        while self._running:
+            try:
+                devices = joulescope.scan()
+                if not devices:
+                    with self._lock:
+                        self._status['last_error'] = 'Nenhum dispositivo encontrado'
+                        self._status['reconnect_count'] = self._status.get('reconnect_count', 0) + 1
+                    print(f"[Joulescope] Dispositivo não encontrado. Reconectando em {RETRY_DELAY_SEC}s...")
+                    for _ in range(RETRY_DELAY_SEC):
+                        if not self._running:
+                            break
+                        time.sleep(1)
+                    continue
 
-            device = joulescope.scan_require_one(config='auto')
+                device = joulescope.scan_require_one(config='auto')
 
-            with device:
-                buffer_duration = max(2.0, window_duration * 2)
-                try:
-                    device.parameter_set('buffer_duration', buffer_duration)
-                except Exception:
-                    pass
-
-                if sampling_rate is None:
+                with device:
+                    buffer_duration = max(2.0, window_duration * 2)
                     try:
-                        device.start()
-                        time.sleep(0.2)
-                        test_data = device.read(contiguous_duration=0.1)
-                        device.stop()
-                        if test_data is not None and len(test_data) > 0:
-                            sampling_rate = len(test_data) / 0.1
-                        else:
-                            sampling_rate = 1000000.0
-                    except Exception:
-                        sampling_rate = 1000000.0
-
-                with self._lock:
-                    self._status['start_time'] = datetime.now().isoformat()
-                    self._status['sampling_rate'] = sampling_rate
-
-                device.start()
-                time.sleep(0.5)
-
-                while self._running:
-                    if max_windows > 0 and window_num >= max_windows:
-                        break
-
-                    window_num += 1
-                    window_start = datetime.now()
-
-                    try:
-                        data = device.read(contiguous_duration=window_duration)
-                    except Exception:
-                        time.sleep(0.5)
-                        continue
-
-                    if data is None or len(data) == 0:
-                        time.sleep(0.1)
-                        continue
-
-                    window_end = datetime.now()
-                    actual_duration = (window_end - window_start).total_seconds()
-                    actual_samples = len(data)
-                    expected_samples = int(sampling_rate * actual_duration)
-                    sample_tolerance = max(100, int(sampling_rate * 0.01))
-                    gap_detected = abs(actual_samples - expected_samples) > sample_tolerance
-
-                    if last_read_time and (window_start - last_read_time).total_seconds() > window_duration * 1.1:
-                        gap_detected = True
-                    last_read_time = window_end
-
-                    stats = self._calculate_statistics(data)
-                    if stats is None:
-                        continue
-
-                    energy_joules, energy_mwh = self._calculate_energy(data, sampling_rate)
-                    total_energy += energy_joules
-
-                    try:
-                        self._log_to_csv(csv_path, window_start, window_end, actual_duration,
-                                        stats, energy_joules, energy_mwh, total_energy, gap_detected)
+                        device.parameter_set('buffer_duration', buffer_duration)
                     except Exception:
                         pass
 
-                    window_data = {
-                        'window_num': window_num,
-                        'window_start': window_start.isoformat(),
-                        'window_end': window_end.isoformat(),
-                        'duration': actual_duration,
-                        'stats': stats,
-                        'energy_joules': energy_joules,
-                        'energy_mwh': energy_mwh,
-                        'total_energy': total_energy,
-                        'total_energy_mwh': total_energy * (1000.0 / 3600.0),
-                        'samples': actual_samples,
-                    }
+                    if sampling_rate is None or sampling_rate == 1000000.0:
+                        try:
+                            device.start()
+                            time.sleep(0.2)
+                            test_data = device.read(contiguous_duration=0.1)
+                            device.stop()
+                            if test_data is not None and len(test_data) > 0:
+                                sampling_rate = len(test_data) / 0.1
+                        except Exception:
+                            pass
+
                     with self._lock:
-                        self._status['window_count'] = window_num
-                        self._status['total_energy'] = total_energy
-                        self._status['last_window'] = window_data
-                    self._notify(window_data)
+                        self._status['start_time'] = self._now_sp().isoformat()
+                        self._status['sampling_rate'] = sampling_rate
+                        self._status['last_error'] = None
 
-                try:
-                    device.stop()
-                except Exception:
-                    pass
+                    device.start()
+                    time.sleep(0.5)
 
-        except Exception as e:
-            with self._lock:
-                self._status['error'] = str(e)
-        finally:
-            with self._lock:
-                self._status['running'] = False
-                self._status['output_file'] = str(csv_path)
+                    while self._running:
+                        if max_windows > 0 and window_num >= max_windows:
+                            break
+
+                        window_num += 1
+                        window_start = self._now_sp()
+
+                        try:
+                            data = device.read(contiguous_duration=window_duration)
+                        except Exception as e:
+                            with self._lock:
+                                self._status['last_error'] = str(e)
+                            raise  # Sai do inner loop, reconecta
+
+                        if data is None or len(data) == 0:
+                            time.sleep(0.1)
+                            continue
+
+                        window_end = self._now_sp()
+                        actual_duration = (window_end - window_start).total_seconds()
+                        actual_samples = len(data)
+                        expected_samples = int(sampling_rate * actual_duration)
+                        sample_tolerance = max(100, int(sampling_rate * 0.01))
+                        gap_detected = abs(actual_samples - expected_samples) > sample_tolerance
+
+                        if last_read_time and (window_start - last_read_time).total_seconds() > window_duration * 1.1:
+                            gap_detected = True
+                        last_read_time = window_end
+
+                        stats = self._calculate_statistics(data)
+                        if stats is None:
+                            continue
+
+                        energy_joules, energy_mwh = self._calculate_energy(data, sampling_rate)
+                        total_energy += energy_joules
+
+                        try:
+                            self._log_to_csv(csv_path, window_start, window_end, actual_duration,
+                                            stats, energy_joules, energy_mwh, total_energy, gap_detected)
+                        except Exception:
+                            pass
+
+                        window_data = {
+                            'window_num': window_num,
+                            'window_start': window_start.isoformat(),
+                            'window_end': window_end.isoformat(),
+                            'duration': actual_duration,
+                            'stats': stats,
+                            'energy_joules': energy_joules,
+                            'energy_mwh': energy_mwh,
+                            'total_energy': total_energy,
+                            'total_energy_mwh': total_energy * (1000.0 / 3600.0),
+                            'samples': actual_samples,
+                        }
+                        with self._lock:
+                            self._status['window_count'] = window_num
+                            self._status['total_energy'] = total_energy
+                            self._status['last_window'] = window_data
+                        self._notify(window_data)
+
+                    try:
+                        device.stop()
+                    except Exception:
+                        pass
+                    break  # max_windows atingido, sai do retry loop
+
+            except Exception as e:
+                with self._lock:
+                    self._status['last_error'] = str(e)
+                    self._status['reconnect_count'] = self._status.get('reconnect_count', 0) + 1
+                print(f"[Joulescope] Erro: {e}. Reconectando em {RETRY_DELAY_SEC}s...")
+                for _ in range(RETRY_DELAY_SEC):
+                    if not self._running:
+                        break
+                    time.sleep(1)
+
+        with self._lock:
+            self._status['running'] = False
+            self._status['output_file'] = str(csv_path)
 
     def start_capture(self, window_duration: float = 10.0, output_file: str = 'joulescope_log.csv',
                      sampling_rate: Optional[float] = None, max_windows: int = 0) -> dict:
