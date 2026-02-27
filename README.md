@@ -30,8 +30,9 @@ App web unificado para captura contínua de dados de consumo de energia via Joul
 ### Com Docker (recomendado)
 
 ```bash
-# Criar diretório de logs
-mkdir -p logs
+# Criar diretório de logs no SD (Radxa)
+sudo mkdir -p /mnt/external_sd/logs
+sudo chown -R $USER:$USER /mnt/external_sd/logs
 
 # Subir o container
 docker compose up -d --build
@@ -60,7 +61,12 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 
 ## Localização dos dados
 
-Os arquivos CSV são salvos em `./logs/` (mapeado para `/app/logs` no container).
+Os arquivos CSV são salvos em `/mnt/external_sd/logs/` (SD externo na Radxa). Crie o diretório antes de subir:
+
+```bash
+sudo mkdir -p /mnt/external_sd/logs
+sudo chown -R $USER:$USER /mnt/external_sd/logs
+```
 
 ## Linux: regras udev (obrigatório para USB)
 
